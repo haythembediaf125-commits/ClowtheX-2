@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Languages, Coins, Palette, Download, Upload, Store, Save } from "lucide-react";
+import { Languages, Coins, Palette, Store, Save, Download, Upload, DatabaseBackup } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -11,30 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useApp } from "@/contexts/AppContext";
-import {
-  getAllProducts,
-  getAllSales,
-  getDB,
-  saveProduct,
-  saveSale,
-  getSetting,
-  setSetting,
-  type Product,
-  type Sale,
-} from "@/lib/db";
+import { getDB, getSetting, setSetting } from "@/lib/db";
 import { toast } from "sonner";
 import type { Lang } from "@/i18n/translations";
 import type { Currency } from "@/lib/db";
-
-const SETTINGS_KEYS = [
-  "storeName",
-  "storePhone",
-  "storeAddress",
-  "lang",
-  "theme",
-  "currency",
-  "exchangeRate",
-] as const;
 
 export function SettingsPage() {
   const {
@@ -48,12 +28,11 @@ export function SettingsPage() {
     exchangeRate,
     setExchangeRate,
   } = useApp();
-  const fileRef = useRef<HTMLInputElement>(null);
+
   const [storeName, setStoreName] = useState("");
   const [storePhone, setStorePhone] = useState("");
   const [storeAddress, setStoreAddress] = useState("");
-  const [isExporting, setIsExporting] = useState(false);
-  const [isImporting, setIsImporting] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     (async () => {
@@ -63,10 +42,7 @@ export function SettingsPage() {
     })();
   }, []);
 
-  const saveStore = async (
-    key: "storeName" | "storePhone" | "storeAddress",
-    value: string,
-  ) => {
+  const saveStore = async (key: "storeName" | "storePhone" | "storeAddress", value: string) => {
     await setSetting(key, value);
   };
 
@@ -80,276 +56,110 @@ export function SettingsPage() {
   };
 
   const handleExport = async () => {
-    setIsExporting(true);
     try {
-      const [products, sales] = await Promise.all([getAllProducts(), getAllSales()]);
-
-      const settingsData: Record<string, unknown> = {};
-      for (const key of SETTINGS_KEYS) {
-        settingsData[key] = await getSetting(key);
-      }
-
-      const data = {
-        version: 3,
-        exportedAt: new Date().toISOString(),
-        products,
-        sales,
-        settings: settingsData,
-      };
-
-      const filename = `clowthex-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      const json = JSON.stringify(data, null, 2);
-      const blob = new Blob([json], { type: "application/json" });
-
-      const shareFile = new File([blob], filename, { type: "application/json" });
-      const canUseShare =
-        typeof navigator !== "undefined" &&
-        "share" in navigator &&
-        typeof navigator.canShare === "function" &&
-        navigator.canShare({ files: [shareFile] });
-
-      if (canUseShare) {
-        try {
-          await navigator.share({
-            files: [shareFile],
-            title: "ClowtheX Backup",
-          });
-          toast.success(t.settings.imported.replace("الاستيراد", "التصدير") || "تم التصدير");
-          return;
-        } catch (err) {
-          if ((err as Error).name === "AbortError") return;
-        }
-      }
-
+      const db = await getDB();
+      const [products, sales, settings] = await Promise.all([
+        db.getAll("products"),
+        db.getAll("sales"),
+        db.getAll("settings"),
+      ]);
+      const backup = { version: 1, exportedAt: Date.now(), products, sales, settings };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = filename;
+      a.download = `clowthex-backup-${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      toast.success(t.settings.saved);
-    } catch {
-      toast.error(t.settings.importError);
-    } finally {
-      setIsExporting(false);
+      toast.success(t.settings.exported);
+    } catch (error) {
+      toast.error("Export Error");
     }
   };
 
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setIsImporting(true);
-    try {
-      const text = await file.text();
-      const data = JSON.parse(text);
-      if (!Array.isArray(data.products)) throw new Error("invalid");
-
-      const db = await getDB();
-      const tx = db.transaction(["products", "sales"], "readwrite");
-      await tx.objectStore("products").clear();
-      if (db.objectStoreNames.contains("sales")) {
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        if (!data.products || !data.sales || !data.settings) throw new Error();
+        const db = await getDB();
+        const tx = db.transaction(["products", "sales", "settings"], "readwrite");
+        await tx.objectStore("products").clear();
         await tx.objectStore("sales").clear();
+        await tx.objectStore("settings").clear();
+        for (const p of data.products) await tx.objectStore("products").put(p);
+        for (const s of data.sales) await tx.objectStore("sales").put(s);
+        for (const s of data.settings) await tx.objectStore("settings").put(s);
+        await tx.done;
+        toast.success(t.settings.imported);
+        setTimeout(() => window.location.reload(), 1000);
+      } catch (error) {
+        toast.error(t.settings.importError);
       }
-      await tx.done;
-
-      for (const p of data.products as Product[]) {
-        await saveProduct(p);
-      }
-
-      if (Array.isArray(data.sales)) {
-        const db2 = await getDB();
-        for (const s of data.sales as Sale[]) {
-          await db2.put("sales", s);
-        }
-      }
-
-      if (data.settings && typeof data.settings === "object") {
-        for (const [key, value] of Object.entries(
-          data.settings as Record<string, unknown>,
-        )) {
-          if (value !== undefined && value !== null) {
-            await setSetting(key, value);
-          }
-        }
-      }
-
-      toast.success(t.settings.imported);
-      setTimeout(() => window.location.reload(), 1200);
-    } catch {
-      toast.error(t.settings.importError);
-    } finally {
-      e.target.value = "";
-      setIsImporting(false);
-    }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
   };
 
   return (
     <div className="px-4 py-5 space-y-5">
       <h2 className="text-xl font-bold">{t.settings.title}</h2>
-
       <Section icon={<Languages className="w-4 h-4" />}>
-        <div>
-          <Label className="text-xs">{t.settings.language}</Label>
-          <Select value={lang} onValueChange={(v) => setLang(v as Lang)}>
-            <SelectTrigger className="mt-1">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ar">العربية</SelectItem>
-              <SelectItem value="fr">Français</SelectItem>
-              <SelectItem value="en">English</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <Label className="text-xs">{t.settings.language}</Label>
+        <Select value={lang} onValueChange={(v) => setLang(v as Lang)}>
+          <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ar">العربية</SelectItem>
+            <SelectItem value="fr">Français</SelectItem>
+            <SelectItem value="en">English</SelectItem>
+          </SelectContent>
+        </Select>
       </Section>
-
       <Section icon={<Coins className="w-4 h-4" />}>
-        <div>
-          <Label className="text-xs">{t.settings.currency}</Label>
-          <Select
-            value={currency}
-            onValueChange={(v) => setCurrency(v as Currency)}
-          >
-            <SelectTrigger className="mt-1">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="DZD">DZD — د.ج</SelectItem>
-              <SelectItem value="EUR">EUR — €</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
+        <Label className="text-xs">{t.settings.currency}</Label>
+        <Select value={currency} onValueChange={(v) => setCurrency(v as Currency)}>
+          <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="DZD">DZD - د.ج</SelectItem>
+            <SelectItem value="EUR">EUR - €</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="mt-3">
           <Label className="text-xs">{t.settings.exchangeRate}</Label>
-          <Input
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="0.01"
-            value={exchangeRate}
-            onChange={(e) =>
-              setExchangeRate(Math.max(0, Number(e.target.value) || 0))
-            }
-            className="mt-1"
-          />
+          <Input type="number" value={exchangeRate} onChange={(e) => setExchangeRate(Number(e.target.value))} className="mt-1" />
         </div>
       </Section>
-
       <Section icon={<Palette className="w-4 h-4" />}>
-        <div>
-          <Label className="text-xs">{t.settings.theme}</Label>
-          <div className="grid grid-cols-2 gap-2 mt-1">
-            <Button
-              variant={theme === "light" ? "gold" : "outline"}
-              onClick={() => setTheme("light")}
-              size="sm"
-            >
-              {t.settings.themeLight}
-            </Button>
-            <Button
-              variant={theme === "dark" ? "gold" : "outline"}
-              onClick={() => setTheme("dark")}
-              size="sm"
-            >
-              {t.settings.themeDark}
-            </Button>
-          </div>
+        <Label className="text-xs">{t.settings.theme}</Label>
+        <div className="grid grid-cols-2 gap-2 mt-1">
+          <Button variant={theme === "light" ? "gold" : "outline"} onClick={() => setTheme("light")}>{t.settings.themeLight}</Button>
+          <Button variant={theme === "dark" ? "gold" : "outline"} onClick={() => setTheme("dark")}>{t.settings.themeDark}</Button>
         </div>
       </Section>
-
       <Section icon={<Store className="w-4 h-4" />} title={t.settings.store}>
-        <div>
-          <Label className="text-xs">{t.settings.storeName}</Label>
-          <Input
-            value={storeName}
-            onChange={(e) => setStoreName(e.target.value)}
-            onBlur={() => saveStore("storeName", storeName)}
-            className="mt-1"
-          />
-        </div>
-        <div>
-          <Label className="text-xs">{t.settings.storePhone}</Label>
-          <Input
-            value={storePhone}
-            onChange={(e) => setStorePhone(e.target.value)}
-            onBlur={() => saveStore("storePhone", storePhone)}
-            className="mt-1"
-          />
-        </div>
-        <div>
-          <Label className="text-xs">{t.settings.storeAddress}</Label>
-          <Input
-            value={storeAddress}
-            onChange={(e) => setStoreAddress(e.target.value)}
-            onBlur={() => saveStore("storeAddress", storeAddress)}
-            className="mt-1"
-          />
-        </div>
-        <Button variant="gold" className="w-full" onClick={handleSaveStore}>
-          <Save className="w-4 h-4" />
-          {t.form.save}
-        </Button>
+        <Input placeholder={t.settings.storeName} value={storeName} onChange={(e) => setStoreName(e.target.value)} className="mb-2" />
+        <Input placeholder={t.settings.storePhone} value={storePhone} onChange={(e) => setStorePhone(e.target.value)} className="mb-2" />
+        <Input placeholder={t.settings.storeAddress} value={storeAddress} onChange={(e) => setStoreAddress(e.target.value)} className="mb-4" />
+        <Button variant="gold" className="w-full" onClick={handleSaveStore}><Save className="w-4 h-4 mr-2" />{t.form.save}</Button>
       </Section>
-
-      <Section icon={<Download className="w-4 h-4" />} title={t.settings.backup}>
-        <div className="grid grid-cols-2 gap-2">
-          <Button
-            variant="outline"
-            onClick={handleExport}
-            disabled={isExporting}
-            className="flex items-center gap-2"
-          >
-            <Download className="w-4 h-4" />
-            {isExporting ? "..." : t.settings.export}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => fileRef.current?.click()}
-            disabled={isImporting}
-            className="flex items-center gap-2"
-          >
-            <Upload className="w-4 h-4" />
-            {isImporting ? "..." : t.settings.import}
-          </Button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json,.json"
-            hidden
-            onChange={handleImport}
-          />
-        </div>
-        <p className="text-xs text-muted-foreground text-center">
-          {lang === "ar"
-            ? "يشمل النسخ الاحتياطي المنتجات والمبيعات والإعدادات"
-            : lang === "fr"
-            ? "La sauvegarde inclut produits, ventes et paramètres"
-            : "Backup includes products, sales and settings"}
-        </p>
+      <Section icon={<DatabaseBackup className="w-4 h-4" />} title={t.settings.backup}>
+        <input ref={importRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
+        <Button variant="gold" className="w-full mb-2" onClick={handleExport}><Download className="w-4 h-4 mr-2" />{t.settings.export}</Button>
+        <Button variant="outline" className="w-full" onClick={() => importRef.current?.click()}><Upload className="w-4 h-4 mr-2" />{t.settings.import}</Button>
       </Section>
     </div>
   );
 }
 
-function Section({
-  icon,
-  title,
-  children,
-}: {
-  icon: React.ReactNode;
-  title?: string;
-  children: React.ReactNode;
-}) {
+function Section({ children, icon, title }: { children: React.ReactNode; icon?: React.ReactNode; title?: string }) {
   return (
-    <div className="rounded-xl border bg-card p-4 shadow-elegant space-y-3">
-      <div className="flex items-center gap-2 text-gold">
-        <span className="w-7 h-7 rounded-md bg-gold/15 grid place-items-center">
-          {icon}
-        </span>
-        {title && <span className="text-sm font-semibold">{title}</span>}
-      </div>
+    <div className="bg-card rounded-xl border p-4 space-y-2 shadow-sm">
+      {(title || icon) && <div className="flex items-center gap-2 text-sm font-semibold border-b pb-2">{icon}{title}</div>}
       {children}
     </div>
   );
