@@ -35,71 +35,99 @@ export function SettingsPage() {
   const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    (async () => {
-      setStoreName((await getSetting<string>("storeName")) || "");
-      setStorePhone((await getSetting<string>("storePhone")) || "");
-      setStoreAddress((await getSetting<string>("storeAddress")) || "");
-    })();
+    const loadSettings = async () => {
+      try {
+        const name = await getSetting("storeName");
+        const phone = await getSetting("storePhone");
+        const address = await getSetting("storeAddress");
+        setStoreName(String(name || ""));
+        setStorePhone(String(phone || ""));
+        setStoreAddress(String(address || ""));
+      } catch (error) {
+        console.error("Error loading settings:", error);
+      }
+    };
+    loadSettings();
   }, []);
 
-  const saveStore = async (key: "storeName" | "storePhone" | "storeAddress", value: string) => {
-    await setSetting(key, value);
-  };
-
   const handleSaveStore = async () => {
-    await Promise.all([
-      setSetting("storeName", storeName),
-      setSetting("storePhone", storePhone),
-      setSetting("storeAddress", storeAddress),
-    ]);
-    toast.success(t.settings.saved);
-  };
-
-  const handleExport = async () => {
     try {
-      const db = await getDB();
-      const [products, sales, settings] = await Promise.all([
-        db.getAll("products"),
-        db.getAll("sales"),
-        db.getAll("settings"),
-      ]);
-      const backup = { version: 1, exportedAt: Date.now(), products, sales, settings };
-      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `clowthex-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      toast.success(t.settings.exported);
+      await setSetting("storeName", storeName);
+      await setSetting("storePhone", storePhone);
+      await setSetting("storeAddress", storeAddress);
+      toast.success(t.settings.saved);
     } catch (error) {
-      toast.error("Export Error");
+      toast.error("Error saving settings");
     }
   };
 
+  // --- منطق التصدير المطور ليتوافق مع مشروعك ---
+  const handleExport = async () => {
+    try {
+      const db = await getDB();
+      // استخراج البيانات يدوياً لضمان التوافق مع idb
+      const products = await db.getAll("products");
+      const sales = await db.getAll("sales");
+      const settings = await db.getAll("settings");
+
+      const backupData = {
+        app: "ClowtheX",
+        version: 1,
+        date: new Date().toISOString(),
+        data: { products, sales, settings }
+      };
+
+      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `clowthex-backup-${new Date().toLocaleDateString().replace(/\//g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      
+      toast.success(t.settings.exported || "تم التصدير بنجاح");
+    } catch (error) {
+      console.error("Export Error:", error);
+      toast.error("فشل التصدير: تأكد من وجود بيانات");
+    }
+  };
+
+  // --- منطق الاستيراد المطور ليتوافق مع مشروعك ---
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
-    reader.onload = async (ev) => {
+    reader.onload = async (event) => {
       try {
-        const data = JSON.parse(ev.target?.result as string);
-        if (!data.products || !data.sales || !data.settings) throw new Error();
+        const json = JSON.parse(event.target?.result as string);
+        const data = json.data || json; // دعم كلا الهيكلين
+
+        if (!data.products || !data.sales || !data.settings) {
+          throw new Error("Invalid Backup Format");
+        }
+
         const db = await getDB();
+        // تنفيذ العمليات في تسلسل لضمان عدم حدوث تعارض في Transaction
         const tx = db.transaction(["products", "sales", "settings"], "readwrite");
+        
         await tx.objectStore("products").clear();
         await tx.objectStore("sales").clear();
         await tx.objectStore("settings").clear();
+
         for (const p of data.products) await tx.objectStore("products").put(p);
         for (const s of data.sales) await tx.objectStore("sales").put(s);
-        for (const s of data.settings) await tx.objectStore("settings").put(s);
+        for (const st of data.settings) await tx.objectStore("settings").put(st);
+
         await tx.done;
-        toast.success(t.settings.imported);
+        
+        toast.success(t.settings.imported || "تم الاستيراد بنجاح");
         setTimeout(() => window.location.reload(), 1000);
       } catch (error) {
-        toast.error(t.settings.importError);
+        console.error("Import Error:", error);
+        toast.error(t.settings.importError || "الملف غير صالح");
       }
     };
     reader.readAsText(file);
@@ -109,6 +137,7 @@ export function SettingsPage() {
   return (
     <div className="px-4 py-5 space-y-5">
       <h2 className="text-xl font-bold">{t.settings.title}</h2>
+
       <Section icon={<Languages className="w-4 h-4" />}>
         <Label className="text-xs">{t.settings.language}</Label>
         <Select value={lang} onValueChange={(v) => setLang(v as Lang)}>
@@ -120,6 +149,7 @@ export function SettingsPage() {
           </SelectContent>
         </Select>
       </Section>
+
       <Section icon={<Coins className="w-4 h-4" />}>
         <Label className="text-xs">{t.settings.currency}</Label>
         <Select value={currency} onValueChange={(v) => setCurrency(v as Currency)}>
@@ -131,9 +161,15 @@ export function SettingsPage() {
         </Select>
         <div className="mt-3">
           <Label className="text-xs">{t.settings.exchangeRate}</Label>
-          <Input type="number" value={exchangeRate} onChange={(e) => setExchangeRate(Number(e.target.value))} className="mt-1" />
+          <Input 
+            type="number" 
+            value={exchangeRate} 
+            onChange={(e) => setExchangeRate(Number(e.target.value))} 
+            className="mt-1" 
+          />
         </div>
       </Section>
+
       <Section icon={<Palette className="w-4 h-4" />}>
         <Label className="text-xs">{t.settings.theme}</Label>
         <div className="grid grid-cols-2 gap-2 mt-1">
@@ -141,16 +177,31 @@ export function SettingsPage() {
           <Button variant={theme === "dark" ? "gold" : "outline"} onClick={() => setTheme("dark")}>{t.settings.themeDark}</Button>
         </div>
       </Section>
+
       <Section icon={<Store className="w-4 h-4" />} title={t.settings.store}>
-        <Input placeholder={t.settings.storeName} value={storeName} onChange={(e) => setStoreName(e.target.value)} className="mb-2" />
-        <Input placeholder={t.settings.storePhone} value={storePhone} onChange={(e) => setStorePhone(e.target.value)} className="mb-2" />
-        <Input placeholder={t.settings.storeAddress} value={storeAddress} onChange={(e) => setStoreAddress(e.target.value)} className="mb-4" />
-        <Button variant="gold" className="w-full" onClick={handleSaveStore}><Save className="w-4 h-4 mr-2" />{t.form.save}</Button>
+        <div className="space-y-3">
+          <Input placeholder={t.settings.storeName} value={storeName} onChange={(e) => setStoreName(e.target.value)} />
+          <Input placeholder={t.settings.storePhone} value={storePhone} onChange={(e) => setStorePhone(e.target.value)} />
+          <Input placeholder={t.settings.storeAddress} value={storeAddress} onChange={(e) => setStoreAddress(e.target.value)} />
+          <Button variant="gold" className="w-full" onClick={handleSaveStore}>
+            <Save className="w-4 h-4 mr-2" />
+            {t.form.save}
+          </Button>
+        </div>
       </Section>
-      <Section icon={<DatabaseBackup className="w-4 h-4" />} title={t.settings.backup}>
-        <input ref={importRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
-        <Button variant="gold" className="w-full mb-2" onClick={handleExport}><Download className="w-4 h-4 mr-2" />{t.settings.export}</Button>
-        <Button variant="outline" className="w-full" onClick={() => importRef.current?.click()}><Upload className="w-4 h-4 mr-2" />{t.settings.import}</Button>
+
+      <Section icon={<DatabaseBackup className="w-4 h-4" />} title={t.settings.backup || "النسخ الاحتياطي"}>
+        <div className="space-y-3">
+          <input ref={importRef} type="file" accept=".json" className="hidden" onChange={handleImportFile} />
+          <Button variant="gold" className="w-full" onClick={handleExport}>
+            <Download className="w-4 h-4 mr-2" />
+            {t.settings.export || "تصدير البيانات"}
+          </Button>
+          <Button variant="outline" className="w-full" onClick={() => importRef.current?.click()}>
+            <Upload className="w-4 h-4 mr-2" />
+            {t.settings.import || "استيراد البيانات"}
+          </Button>
+        </div>
       </Section>
     </div>
   );
@@ -159,7 +210,12 @@ export function SettingsPage() {
 function Section({ children, icon, title }: { children: React.ReactNode; icon?: React.ReactNode; title?: string }) {
   return (
     <div className="bg-card rounded-xl border p-4 space-y-2 shadow-sm">
-      {(title || icon) && <div className="flex items-center gap-2 text-sm font-semibold border-b pb-2">{icon}{title}</div>}
+      {(title || icon) && (
+        <div className="flex items-center gap-2 text-sm font-semibold border-b pb-2 mb-2">
+          {icon}
+          {title}
+        </div>
+      )}
       {children}
     </div>
   );
